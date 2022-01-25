@@ -4,9 +4,8 @@
 # (C) 2022 All For Eco
 # Written by Jan Lindblad <jan.lindblad@protonmail.com>
 
-import sys, getopt, datetime, hashlib, csv
+import sys, getopt, datetime, hashlib, csv, math
 from logging import debug, warning, error, critical
-from typing import Type
 
 class Typevote:
   def __init__(self):
@@ -94,20 +93,49 @@ class Typevote:
       print(f'** Vote results {self.results}')
     print(f'Read {vote_record_count} records resulting in {len(votes)} unique, valid votes\n')
 
+  @staticmethod
+  def at_least_one_numeric(lst):
+    for x in lst:
+      try:
+        int(x)
+        return True
+      except:
+        pass
+    return False
+
   def gen_result(self, result_file):
     print(f'==> Generating result into "{result_file}"')
     with open(result_file, "wt") as f:
       f.write(f'Results from vote "{self.salt}"\nGenerated on {datetime.datetime.now()}\n\n')
 
+      total_votes = 0
       for i, q in enumerate(self.results):
         total_votes = sum([self.results[q][answer] for answer in self.results[q]])
         if total_votes == 0:
           continue
-        f.write(f'{i}. Question "{q}", total votes {total_votes}\n')
+        scored_q = self.at_least_one_numeric(self.results[q].keys())
+        f.write(f'{i}. Question "{q}", total votes {total_votes} (scored {scored_q})\n')
+        score = 0
+        numeric_votes = 0
         for response in self.results[q]:
-          response_text = response if response != "" else "<BLANK>"
           vote_count = self.results[q][response]
-          f.write(f'  {response_text}: {vote_count} / {total_votes} = {100*vote_count/total_votes:6.2f}%\n')
+          if response == "":
+            response_text = "<BLANK>"
+          else: 
+            response_text = response 
+          try:
+            val = int(response)
+            score += val*vote_count
+            score_text = f'  Score[sum] {val*vote_count}'
+            numeric_votes += vote_count
+          except:
+            score_text = ''
+          f.write(f'  {response_text}: {vote_count} / {total_votes} = {100*vote_count/total_votes:6.2f}% {score_text}\n')
+        if score:
+          avg = score/numeric_votes
+          bonus = math.log10(numeric_votes)+1
+          f.write(f'  Score[sum] = {score}    Score[avg] = {avg:6.2f}    Score[mix] = {avg*bonus:6.2f}\n')
+
         f.write('\n')
       f.write(f'-----\nTotal discarded voterids: {len(self.rogue_voterids)}, ids: {", ".join(self.rogue_voterids)}\n')
     print(f'Wrote results to {len(self.results)} questions based on {total_votes} valid voters. {len(self.rogue_voterids)} rogue voters discarded.\n')

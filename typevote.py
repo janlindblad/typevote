@@ -16,6 +16,8 @@ class Typevote:
     self.debug = False
     self.results = {}
     self.rogue_voterids = set()
+    self.scores = {}
+    self.winner = {}
 
   def salted_hash(self, str_to_hash):
     hashed_str = hashlib.md5((self.salt+str_to_hash).encode()).hexdigest()[:self.codelen]
@@ -130,15 +132,43 @@ class Typevote:
             numeric_votes += vote_count
           except:
             score_text = ''
-          f.write(f'  {response_text}: {vote_count} / {total_votes} = {100*vote_count/total_votes:6.2f}% {score_text}\n')
+          vote_share = vote_count/total_votes
+          f.write(f'  {response_text}: {vote_count} / {total_votes} = {100*vote_share:6.2f}% {score_text}\n')
+          if q not in self.winner:
+            self.winner[q] = (vote_share, [response_text])
+          else:
+            (prev_share, prev_text_list) = self.winner[q]
+            if prev_share == vote_share:              
+              self.winner[q] = (vote_share, prev_text_list + [response_text])
+            elif prev_share < vote_share:
+              self.winner[q] = (vote_share, [response_text])
         if score:
           avg = score/numeric_votes
           bonus = math.log10(numeric_votes)+1
-          f.write(f'  Score[sum] = {score}    Score[avg] = {avg:6.2f}    Score[mix] = {avg*bonus:6.2f}\n')
-
+          mix = avg*bonus
+          self.scores[q] = {'sum':score, 'avg':avg, 'mix':mix}
+          f.write(f'  Score[sum] = {score}    Score[avg] = {avg:6.2f}    Score[mix] = {mix:6.2f}\n')
         f.write('\n')
       f.write(f'-----\nTotal discarded voterids: {len(self.rogue_voterids)}, ids: {", ".join(self.rogue_voterids)}\n')
     print(f'Wrote results to {len(self.results)} questions based on {total_votes} valid voters. {len(self.rogue_voterids)} rogue voters discarded.\n')
+
+  def gen_win(self, win_file):
+    print(f'==> Generating winners into "{win_file}"')
+    with open(win_file, "wt") as f:
+      f.write(f'Winners from vote "{self.salt}"\nGenerated on {datetime.datetime.now()}\n')
+
+      if self.scores:
+        for method in ['sum', 'avg', 'mix']:
+          prev_val = None
+          f.write(f'\nWinners by method {method}:\n')
+          for i, q in enumerate(sorted(self.scores, key=lambda e: self.scores[e][method], reverse=True),1):
+            val = self.scores[q][method]
+            if val != prev_val:
+              f.write(f'{i:4}. ')
+            else:
+              f.write(f'      ')
+            f.write(f'{q}: {val:6.2f}\n')
+            prev_val = val
 
   def run_command_line(self, sys_argv=sys.argv):
     def usage(sys_argv):
@@ -152,6 +182,7 @@ class Typevote:
         -c | --codefile <file>      Generated CSV file with emails and voterids
         -v | --votefile <file>      CSV file with votes cast by voters
         -r | --resultfile <file>    Generated text file with vote count
+        -W | --winfile <file>       Generated text file with questions ranked by score
 
         For example, to generate a CSV file with voterids to upload to a mass mailer
         based on a list of emails in voters1.txt and voters2.txt for a vote on favorite color:
@@ -165,9 +196,9 @@ class Typevote:
       ''')
     debug = False
     try:
-      opts, args = getopt.getopt(sys_argv[1:],"hdn:e:c:v:r:",
+      opts, args = getopt.getopt(sys_argv[1:],"hdn:e:c:v:r:w:",
         ["help", "debug", "name=", 
-         "emailfile=", "codefile=", "votefile=", "resultfile="])
+         "emailfile=", "codefile=", "votefile=", "resultfile=", "winfile="])
     except getopt.GetoptError:
       usage(sys_argv)
       sys.exit(2)
@@ -189,6 +220,8 @@ class Typevote:
         self.get_votes(arg)
       elif opt in ("-r", "--resultfile"):
         self.gen_result(arg)
+      elif opt in ("-w", "--winfile"):
+        self.gen_win(arg)
       else:
         critical(f'Unknown option "{opt}".')
         sys.exit(1)

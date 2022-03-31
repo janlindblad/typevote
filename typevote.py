@@ -7,6 +7,8 @@
 import sys, getopt, datetime, hashlib, csv, math
 from logging import debug, warning, error, critical
 
+# FIXME: Make hash of lowercase email address.
+
 class Typevote:
   def __init__(self):
     self.salt = str(datetime.datetime.now())
@@ -29,7 +31,7 @@ class Typevote:
       valid_count, skip_count, dup_count = 0, 0, 0
       for line in emails.readlines():
         if "@" in line:
-          clean_email = line.strip()
+          clean_email = line.strip() # FIXME: lowercase here
           if clean_email not in self.voters:
             valid_count += 1
             self.voters.add(clean_email)
@@ -62,6 +64,7 @@ class Typevote:
     if None in self.voterids:
       critical(f'Illegal voterid in voter database.')
       sys.exit(3)
+    typeform_admin_keys = set(('#', 'Network ID', 'voterid', 'Start Date (UTC)', 'Submit Date (UTC)'))
     with open(vote_file, newline='') as csvfile:
       votereader = csv.DictReader(csvfile)
       vote_record_count = 0
@@ -74,8 +77,11 @@ class Typevote:
         voterid = vote['voterid']
         if self.debug:
           print(f'** Reading vote from {voterid}: {vote}')
-        votes[voterid] = vote
-    responses = {fieldname:{} for fieldname in qlist}
+        if voterid not in votes:
+          votes[voterid] = vote
+        elif self.debug:
+          print(f'** Skipping vote, already have more recent vote from {voterid}')
+    responses = {fieldname:{} for fieldname in qlist if fieldname not in typeform_admin_keys}
     for voterid in votes:
       if self.debug:
         print(f'** Processing vote from {voterid}: {votes[voterid]}')
@@ -85,6 +91,8 @@ class Typevote:
         self.rogue_voterids.add(voterid)
         continue
       for q in qlist:
+        if q in typeform_admin_keys:
+          continue
         response = votes[voterid].get(q)
         if response in responses[q]:
           responses[q][response] += 1
@@ -93,7 +101,7 @@ class Typevote:
     self.results = responses
     if self.debug:
       print(f'** Vote results {self.results}')
-    print(f'Read {vote_record_count} records resulting in {len(votes)} unique, valid votes\n')
+    print(f'Read {vote_record_count} records resulting in {len(votes)-len(self.rogue_voterids)} unique, valid votes\n')
 
   @staticmethod
   def at_least_one_numeric(lst):
@@ -111,7 +119,7 @@ class Typevote:
       f.write(f'Results from vote "{self.salt}"\nGenerated on {datetime.datetime.now()}\n\n')
 
       total_votes = 0
-      for i, q in enumerate(self.results):
+      for i, q in enumerate(self.results, 1):
         total_votes = sum([self.results[q][answer] for answer in self.results[q]])
         if total_votes == 0:
           continue
@@ -133,7 +141,7 @@ class Typevote:
           except:
             score_text = ''
           vote_share = vote_count/total_votes
-          f.write(f'  {response_text}: {vote_count} / {total_votes} = {100*vote_share:6.2f}% {score_text}\n')
+          f.write(f'  {response_text}: {vote_count:4} / {total_votes:4} = {100*vote_share:6.2f}% {score_text}\n')
           if q not in self.winner:
             self.winner[q] = (vote_share, [response_text])
           else:
@@ -158,7 +166,7 @@ class Typevote:
       f.write(f'Winners from vote "{self.salt}"\nGenerated on {datetime.datetime.now()}\n')
 
       if self.scores:
-        for method in ['sum', 'avg', 'mix']:
+        for method in ['sum']:#, 'avg', 'mix']:
           prev_val = None
           f.write(f'\nWinners by method {method}:\n')
           for i, q in enumerate(sorted(self.scores, key=lambda e: self.scores[e][method], reverse=True),1):

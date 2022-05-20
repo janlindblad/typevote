@@ -20,6 +20,8 @@ class Typevote:
     self.rogue_voterids = set()
     self.scores = {}
     self.winner = {}
+    self.voterid_tag = "voterid"
+    self.rank = 6
 
   def salted_hash(self, str_to_hash):
     hashed_str = hashlib.md5((self.salt+str_to_hash).encode()).hexdigest()[:self.codelen]
@@ -64,17 +66,17 @@ class Typevote:
     if None in self.voterids:
       critical(f'Illegal voterid in voter database.')
       sys.exit(3)
-    typeform_admin_keys = set(('#', 'Network ID', 'voterid', 'Start Date (UTC)', 'Submit Date (UTC)'))
+    typeform_admin_keys = set(('#', 'Network ID', self.voterid_tag, 'Start Date (UTC)', 'Submit Date (UTC)'))
     with open(vote_file, newline='') as csvfile:
       votereader = csv.DictReader(csvfile)
       vote_record_count = 0
       qlist = votereader.fieldnames
-      if "voterid" not in qlist:
-        critical(f'No voterid column in votefile.')
+      if self.voterid_tag not in qlist:
+        critical(f'No "{self.voterid_tag}" column in votefile.')
         sys.exit(4)
       for vote in votereader:
         vote_record_count += 1
-        voterid = vote['voterid']
+        voterid = vote[self.voterid_tag]
         if self.debug:
           print(f'** Reading vote from {voterid}: {vote}')
         if voterid not in votes:
@@ -127,6 +129,21 @@ class Typevote:
         f.write(f'{i}. Question "{q}", total votes {total_votes} (scored {scored_q})\n')
         score = 0
         numeric_votes = 0
+        ranked = False
+        comma_count = []
+        # Check whether this is a ranked choice. If it is, it will have the same number of commas
+        # in every response, and they will be many at least as many as the rank
+        for response in self.results[q]:
+          comma_count += [len([1 for c in response if c == ","])]
+        ranked = comma_count[0] > self.rank and len([1 for c in comma_count if c != comma_count[0]]) == 0
+        if ranked:
+          ranked_options = {option:0 for option in response.split(',')}
+          for response in self.results[q]:
+            for (weight, option) in enumerate(response.split(',')):
+              #print(f"{option} {max(self.rank-weight,0)} {self.results[q][response]}")
+              ranked_options[option] += self.results[q][response] * max(self.rank-weight,0)
+            #print(f"{ranked_options}")
+          self.results[q] = ranked_options
         for response in self.results[q]:
           vote_count = self.results[q][response]
           if response == "":
@@ -141,7 +158,10 @@ class Typevote:
           except:
             score_text = ''
           vote_share = vote_count/total_votes
-          f.write(f'  {response_text}: {vote_count:4} / {total_votes:4} = {100*vote_share:6.2f}% {score_text}\n')
+          if not ranked:
+            f.write(f'  {response_text}: {vote_count:4} / {total_votes:4} = {100*vote_share:6.2f}% {score_text}\n')
+          else:
+            f.write(f'  {response_text}: {vote_count:4}\n')
           if q not in self.winner:
             self.winner[q] = (vote_share, [response_text])
           else:
@@ -206,7 +226,8 @@ class Typevote:
     try:
       opts, args = getopt.getopt(sys_argv[1:],"hdn:e:c:v:r:w:",
         ["help", "debug", "name=", 
-         "emailfile=", "codefile=", "votefile=", "resultfile=", "winfile="])
+         "emailfile=", "codefile=", "votefile=", "resultfile=", "winfile=", 
+         "voterid-tag="])
     except getopt.GetoptError:
       usage(sys_argv)
       sys.exit(2)
@@ -230,6 +251,8 @@ class Typevote:
         self.gen_result(arg)
       elif opt in ("-w", "--winfile"):
         self.gen_win(arg)
+      elif opt in ("--voterid-tag"):
+        self.voterid_tag = arg
       else:
         critical(f'Unknown option "{opt}".')
         sys.exit(1)

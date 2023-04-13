@@ -4,10 +4,8 @@
 # (C) 2022 All For Eco
 # Written by Jan Lindblad <jan.lindblad@protonmail.com>
 
-import sys, getopt, datetime, hashlib, csv, math
+import sys, getopt, datetime, hashlib, csv, math, re
 from logging import debug, warning, error, critical
-
-# FIXME: Make hash of lowercase email address.
 
 class Typevote:
   def __init__(self):
@@ -15,12 +13,21 @@ class Typevote:
     self.codelen = 12
     self.voters = set()
     self.voterids = {}
+    self.orgs = {}
     self.debug = False
     self.results = {}
     self.rogue_voterids = set()
     self.scores = {}
     self.winner = {}
+    self.quiz_answers = {}
+    self.quiz_answers_regex = {}
+    self.quiz_scores = {}
+    self.quiz_qchecks = {}
+    self.quiz_results = {}
+    self.quiz_orgs = {}
     self.voterid_tag = "voterid"
+    self.email_tag = "email"
+    self.org_tag = "org"
     self.rank = 6
 
   def salted_hash(self, str_to_hash):
@@ -28,12 +35,16 @@ class Typevote:
     return hashed_str
 
   def add_emails(self, email_file):
-    print(f'==> Reading email file "{email_file}"')
-    with open(email_file, "r") as emails:
-      valid_count, skip_count, dup_count = 0, 0, 0
-      for line in emails.readlines():
-        if "@" in line:
-          clean_email = line.strip() # FIXME: lowercase here
+    def handle_emails(emails, orgs=[]):
+      valid_count, skip_count, dup_count, comma_count = 0, 0, 0, 0
+      if len(orgs) < len(emails):
+        orgs += ['' for _ in emails]
+      for (email_str, org_str) in zip(emails, orgs):
+        if "@" in email_str:
+          clean_email = email_str.strip().lower()
+          clean_org = org_str.strip().upper()
+          if "," in clean_email:
+            comma_count += 1
           if clean_email not in self.voters:
             valid_count += 1
             self.voters.add(clean_email)
@@ -42,11 +53,29 @@ class Typevote:
               critical(f'Hash collision, {clean_email} clashes with {self.voterids[voter_code]} hash "{voter_code}".')
               sys.exit(2)
             self.voterids[voter_code] = clean_email
+            self.orgs[voter_code] = clean_org
           else:
             dup_count += 1
         else:
           skip_count += 1
-      print(f'{valid_count:4} valid, {dup_count:4} duplicate, {skip_count:4} skipped lines, salted as "{self.salt}"\n')
+      print(f'{valid_count:4} valid, {comma_count:4} emails with commas, {dup_count:4} duplicate, {skip_count:4} skipped lines, salted as "{self.salt}"\n')
+
+    try:
+      csv.register_dialect('skipinitialspace', skipinitialspace=True)
+      print(f'==> Reading email file "{email_file}"')
+      with open(email_file, newline='') as csvfile:
+        emailreader = csv.DictReader(csvfile, dialect='skipinitialspace')
+        emails = []
+        orgs = []
+        for emailrec in emailreader:
+          emails += [emailrec[self.email_tag]]
+          orgs += [emailrec.get(self.org_tag, '')]
+        print(f'==> Treating as CSV format input')
+        handle_emails(emails,orgs)
+    except:
+      print(f'==> Treating as plain email input')
+      with open(email_file, "r") as emails:
+        handle_emails(emails.readlines())
 
   def gen_codefile(self, code_file):
     print(f'==> Generating code file "{code_file}"')
@@ -57,10 +86,27 @@ class Typevote:
     if code_file:
       with open(code_file, "wt") as f:
         for voterid in self.voterids:
-          f.write(f'{self.voterids[voterid]},{voterid}\n')
+          f.write(f'{self.voterids[voterid]},{self.orgs[voterid]},{voterid}\n')
       print(f'{len(self.voterids)} voter codes written\n')
 
   def get_votes(self, vote_file):
+    def record_quiz_answer(voterid, n, q, response):
+      q = q.replace('\n',' ').replace('\r',' ')
+      if n in self.quiz_answers:
+        if self.quiz_qchecks[n].match(q):
+          if self.quiz_answers[n].match(response):
+            if self.debug:
+              print(f'** {voterid} has correct answer on #{n} and is awarded {self.quiz_scores[n]} points')
+            self.quiz_results[voterid] = self.quiz_results.get(voterid,0) + self.quiz_scores[n]
+          else:
+            if self.debug:
+              print(f'** {voterid} has wrong answer on #{n} Q="{q[:10]}" C="{self.quiz_answers_regex[n][:10]}" A="{response[:10]}"')
+        else:
+          print(f'** >> answerfile has mismatching qcheck on #{n} {q[:10]}')
+      else:
+        if self.debug:
+          print(f'** answerfile has no answer on #{n} {q[:10]}')
+
     print(f'==> Reading votes from "{vote_file}"')
     votes = {}
     if None in self.voterids:
@@ -92,10 +138,11 @@ class Typevote:
           print(f'** >> Rogue voterid "{voterid}" <<')
         self.rogue_voterids.add(voterid)
         continue
-      for q in qlist:
+      for (n,q) in enumerate(qlist):
         if q in typeform_admin_keys:
           continue
         response = votes[voterid].get(q)
+        record_quiz_answer(voterid, n, q, response)
         if response in responses[q]:
           responses[q][response] += 1
         else:
@@ -116,6 +163,27 @@ class Typevote:
     return False
 
   def gen_result(self, result_file):
+    def gen_quiz_results(f):
+      f.write('\n\n-----\nQuiz Results:\n')
+      org_results = {}
+      for voterid in self.quiz_results:
+        org = self.orgs[voterid]
+        if self.debug:
+          print(f"{voterid} in org {org} got {self.quiz_results[voterid]} points")
+        if not org in org_results:
+          org_results[org] = {}
+        org_results[org][voterid] = self.quiz_results[voterid]
+      total_score, total_count = 0, 0
+      for org in org_results:
+        score = sum(org_results[org].values())
+        total_score += score
+        count = len(org_results[org])
+        total_count += count
+        avg = score/count
+        f.write(f"{org} got {score} points from {count} participants, average is {avg}\n")
+      total_avg = total_score / total_count
+      f.write(f"\nAverage across all orgs is {total_avg}, total participation {total_count}\n")
+
     print(f'==> Generating result into "{result_file}"')
     with open(result_file, "wt") as f:
       f.write(f'Results from vote "{self.salt}"\nGenerated on {datetime.datetime.now()}\n\n')
@@ -178,6 +246,8 @@ class Typevote:
           f.write(f'  Score[sum] = {score}    Score[avg] = {avg:6.2f}    Score[mix] = {mix:6.2f}\n')
         f.write('\n')
       f.write(f'-----\nTotal discarded voterids: {len(self.rogue_voterids)}, ids: {", ".join(self.rogue_voterids)}\n')
+      gen_quiz_results(f)
+
     print(f'Wrote results to {len(self.results)} questions based on {total_votes} valid voters. {len(self.rogue_voterids)} rogue voters discarded.\n')
 
   def gen_win(self, win_file):
@@ -198,19 +268,37 @@ class Typevote:
             f.write(f'{q}: {val:6.2f}\n')
             prev_val = val
 
+  def read_quiz_answers(self, answer_file):
+    print(f'==> Reading quiz answers from "{answer_file}"')
+    with open(answer_file, "r") as f:
+      answers = f.readlines()
+      for answer in answers:
+        answer = answer.strip()
+        if answer.startswith("#") or answer == "":
+          continue
+        [num, score, question_regex, *answer_regex_parts] = answer.split(":")
+        answer_regex = ":".join(answer_regex_parts)
+        num = int(num)
+        self.quiz_answers[num] = re.compile(answer_regex)
+        self.quiz_answers_regex[num] = answer_regex
+        self.quiz_scores[num] = int(score)
+        self.quiz_qchecks[num] = re.compile(question_regex)
+
   def run_command_line(self, sys_argv=sys.argv):
     def usage(sys_argv):
       print(f'''{sys_argv[0]} [--help] [--debug] [--name <votename>] --emailfile <file> --codefile <file> \\
-  [--votefile <file> --resultfile <file>]
+  [--votefile <file> --resultfile <file> --answerfile <file>]
         -h | --help                 Show this help information
         -d | --debug                Enable debug output
         -n | --name <votename>      Name of the vote, needs to be the same for successive
                                     invocations that pertain to the same vote count
         -e | --emailfile <file>     List of voters' emails, one email address on each line
+                                    May be followed by orgname
         -c | --codefile <file>      Generated CSV file with emails and voterids
         -v | --votefile <file>      CSV file with votes cast by voters
-        -r | --resultfile <file>    Generated text file with vote count
-        -W | --winfile <file>       Generated text file with questions ranked by score
+        -r | --resultfile <file>    Generated text file with vote count / quiz results
+        -w | --winfile <file>       Generated text file with questions ranked by score
+        -a | --answerfile <file>    Generate quiz results based on correct answers
 
         For example, to generate a CSV file with voterids to upload to a mass mailer
         based on a list of emails in voters1.txt and voters2.txt for a vote on favorite color:
@@ -227,7 +315,8 @@ class Typevote:
       opts, args = getopt.getopt(sys_argv[1:],"hdn:e:c:v:r:w:",
         ["help", "debug", "name=", 
          "emailfile=", "codefile=", "votefile=", "resultfile=", "winfile=", 
-         "voterid-tag="])
+         "answerfile=",
+         "voterid-tag=", "email-tag=", "org-tag="])
     except getopt.GetoptError:
       usage(sys_argv)
       sys.exit(2)
@@ -251,8 +340,14 @@ class Typevote:
         self.gen_result(arg)
       elif opt in ("-w", "--winfile"):
         self.gen_win(arg)
+      elif opt in ("-a", "--answerfile"):
+        self.read_quiz_answers(arg)
       elif opt in ("--voterid-tag"):
         self.voterid_tag = arg
+      elif opt in ("--email-tag"):
+        self.email_tag = arg
+      elif opt in ("--org-tag"):
+        self.org_tag = arg
       else:
         critical(f'Unknown option "{opt}".')
         sys.exit(1)
